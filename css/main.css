@@ -1,0 +1,19 @@
+body {
+    overflow:hidden;
+    padding:25px;
+}
+
+.gm-style-cc, .gm-style-mtc, #geojsonData {
+    display:none;
+}       
+
+.realtime_graph_containers {
+    width: 600px; 
+    height: 400px; 
+    margin: 0 auto;
+}
+
+#map {
+    width: 95vw; 
+    height: 90vh;
+}

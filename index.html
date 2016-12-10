@@ -1,0 +1,491 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="initial-scale=1.0, user-scalable=no" />
+        <title>Google Map</title>             
+        <script src="https://maps.googleapis.com/maps/api/js?callback=myMap"></script>
+        <script src="js/jquery-1.12.3.min.js"></script>     
+        <link rel="stylesheet" href="css/main.css" type="text/css" />
+        <script>
+            $(document).ready(function () {
+                var mapOptions = {
+                    zoom: 13,
+                    center: new google.maps.LatLng(1.3521, 103.8198),
+                    mapTypeId: google.maps.MapTypeId.TERRAIN
+                };
+                map = new google.maps.Map(document.getElementById('map'), mapOptions);
+
+                // assumed format of geojson when shp file is converted
+                var geojsonData;
+
+                var map;
+                var getCrowdDataInterval;
+                var areaPolygons = {};
+                var areas = {};
+                var areaCentroids = {};
+                var areaCount = {};                
+
+                var maxMainLat = null;
+                var minMainLat = null;
+                var maxMainLng = null;
+                var minMainLng = null;
+
+                $.ajax({
+                    url: "data/geojson.json",
+                    type: "get",
+                    dataType: "json",
+                    success: function (data) {
+                        geojsonData = data;
+
+                        for (var g = 0; g < geojsonData.length; g++) {
+                            var name = geojsonData[g]["properties"]["name"];
+                            var coordinates = geojsonData[g]["geometry"]["coordinates"][0];
+                            var polypaths = [];
+
+                            var maxLat = null;
+                            var minLat = null;
+
+                            var maxLng = null;
+                            var minLng = null;
+
+                            for (var c = 0; c < coordinates.length; c++) {
+                                var coordPair = {lat: 0, lng: 0};
+                                var lat = coordinates[c][1];
+                                var lng = coordinates[c][0];
+
+                                if (maxLat == null || maxLat < lat) {
+                                    maxLat = lat;
+                                }
+
+                                if (maxLng == null || maxLng < lng) {
+                                    maxLng = lng;
+                                }
+
+                                if (minLat == null || minLat > lat) {
+                                    minLat = lat;
+                                }
+
+                                if (minLng == null || minLng > lng) {
+                                    minLng = lng;
+                                }
+
+                                coordPair.lat = lat;
+                                coordPair.lng = lng;
+                                polypaths.push(coordPair);
+
+                                if (maxMainLat == null || maxMainLat < lat) {
+                                    maxMainLat = lat;
+                                }
+
+                                if (maxMainLng == null || maxMainLng < lng) {
+                                    maxMainLng = lng;
+                                }
+
+                                if (minMainLat == null || minMainLat > lat) {
+                                    minMainLat = lat;
+                                }
+
+                                if (minMainLng == null || minMainLng > lng) {
+                                    minMainLng = lng;
+                                }
+                            }
+
+                            var centroidLat = (maxLat + minLat) / 2;
+                            var centroidLng = (maxLng + minLng) / 2;
+
+                            areaCentroids[name] = [centroidLat, centroidLng];
+                            areas[name] = polypaths;
+                        }
+
+                        var centroidMainLat = (maxMainLat + minMainLat) / 2;
+                        var centroidMainLng = (maxMainLng + minMainLng) / 2;
+
+                        map.setOptions({
+                            center: new google.maps.LatLng(centroidMainLat, centroidMainLng),
+                            zoom: 13
+                        });
+
+                        function Label(opt_options) {
+                            this.setValues(opt_options);
+                            var span = this.span_ = document.createElement('span');
+                            span.style.cssText = 'position: relative; left: -50%; top: -8px;white-space: nowrap;padding: 2px; background-color: black; border-radius:2px;color: white;font-family: Arial; font-size:0.95em;z-index:1000000000000000000';
+
+                            var div = this.div_ = document.createElement('div');
+                            div.appendChild(span);
+                            div.style.cssText = 'position: absolute; display: none';
+                            div.className = "realtime_crowd_labels";
+                        };
+
+                        Label.prototype = new google.maps.OverlayView;
+                        Label.prototype.onAdd = function () {
+                            var pane = this.getPanes().overlayLayer;
+                            pane.appendChild(this.div_);
+                            var me = this;
+                            this.listeners_ = [
+                                google.maps.event.addListener(this, 'position_changed',
+                                        function () {
+                                            me.draw();
+                                        }),
+                                google.maps.event.addListener(this, 'text_changed',
+                                        function () {
+                                            me.draw();
+                                        })
+                            ];
+                        };
+                        Label.prototype.draw = function () {
+                            var projection = this.getProjection();
+                            var position = projection.fromLatLngToDivPixel(this.get('position'));
+
+                            var div = this.div_;
+                            div.style.left = position.x + 'px';
+                            div.style.top = position.y + 'px';
+                            div.style.display = 'block';
+
+                            this.span_.innerHTML = this.get('text').toString();
+                        };
+
+                        var opened_info = new google.maps.InfoWindow();
+
+                        $.each(areas, function (k, v) {
+                            var shape = new google.maps.Polygon({
+                                paths: v,
+                                strokeColor: '#000000',
+                                strokeOpacity: 1.0,
+                                strokeWeight: 2,
+                                fillColor: "#BBBBBB",
+                                fillOpacity: 0.5
+                            });
+                            areaPolygons[k] = shape;
+                            shape.infowindow = new google.maps.InfoWindow({
+                                content: "<div id=\"" + k.replace(" ", "_") + "_graph\" class=\"realtime_graph_containers\"></div>",
+                            });
+                            shape.infowindow.name = k;
+                            shape.setMap(map);
+                            //google.maps.event.addListener(shape, 'click', showInfo); disable clicking to display popup
+                        });
+
+                        function showInfo(event) {
+                            opened_info.close();
+                            this.infowindow.setPosition(event.latLng);
+                            this.infowindow.open(map);
+                            opened_info = this.infowindow;
+
+                            var d = new Date();
+                            var n = d.getTime() + d.getTimezoneOffset();
+                            d = new Date(n);
+                            var day = d.getDate();
+                            if (day < 10) {
+                                day = "0" + d.getDate();
+                            }
+                            var month = "";
+                            switch (d.getMonth()) {
+                                case 0:
+                                    month = "Jan";
+                                    break;
+                                case 1:
+                                    month = "Feb";
+                                    break;
+                                case 2:
+                                    month = "Mar";
+                                    break;
+                                case 3:
+                                    month = "Apr";
+                                    break;
+                                case 4:
+                                    month = "May";
+                                    break;
+                                case 5:
+                                    month = "Jun";
+                                    break;
+                                case 6:
+                                    month = "Jul";
+                                    break;
+                                case 7:
+                                    month = "Aug";
+                                    break;
+                                case 8:
+                                    month = "Sep";
+                                    break;
+                                case 9:
+                                    month = "Oct";
+                                    break;
+                                case 10:
+                                    month = "Nov";
+                                    break;
+                                case 11:
+                                    month = "Dec";
+                                    break;
+                            }
+                            var dateStr = day + " " + month + " " + d.getFullYear();
+
+                            var k = this.infowindow.name;
+                            $("#" + k.replace(" ", "_") + "_graph").highcharts({
+                                title: {
+                                    text: k,
+                                    x: -20 //center
+                                },
+                                subtitle: {
+                                    text: dateStr
+                                },
+                                xAxis: {
+                                    labels: {
+                                        rotation: -90,
+                                    },
+                                    categories: ["00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
+                                },
+                                yAxis: {
+                                    plotLines: [{
+                                            value: 0,
+                                            width: 1,
+                                            color: '#808080'
+                                        }],
+                                    title: {
+                                        text: "Average Crowd Size"
+                                    }
+                                },
+                                tooltip: {
+                                    pointFormat: 'No. of Pax: <b>{point.y}</b>'
+                                },
+                                series: [{
+                                        data: areaCount[k]
+                                    }],
+                                credits: {
+                                    enabled: false
+                                },
+                                legend: {
+                                    enabled: false
+                                }
+                            });
+                        }
+
+                        var threshold = 2000;
+
+                        function returnCountColour(count) {
+                            if (count <= 400) {
+                                return "#CCEEFF";
+                            } else if (count <= 800) {
+                                return "#99DDFF";
+                            } else if (count <= 1200) {
+                                return "#66CCFF";
+                            } else if (count <= 1600) {
+                                return "#33BBFF";
+                            } else if (count <= threshold) {
+                                return "#00AAFF";
+                            } else {
+                                return "#FF0000";
+                            }
+                        }
+
+
+                        getCrowdDataInterval = setInterval(function () {
+                            var d = new Date();
+                            var currentHour = parseInt(d.getHours());
+                            $.each(areaPolygons, function (k, v) {
+                                var count = 0;
+
+                                for (var h = 0; h <= currentHour; h++) {
+                                    switch (h) {
+                                        case 0:
+                                            count = Math.floor((Math.random() * 60)) + 30;
+                                            break;
+                                        case 1:
+                                            count = Math.floor((Math.random() * 600)) + 300;
+                                            break;
+                                        case 2:
+                                            count = Math.floor((Math.random() * 600)) + 300;
+                                            break;
+                                        case 3:
+                                            count = Math.floor((Math.random() * 600)) + 300;
+                                            break;
+                                        case 4:
+                                            count = Math.floor((Math.random() * 700)) + 350;
+                                            break;
+                                        case 5:
+                                            count = Math.floor((Math.random() * 1200)) + 600;
+                                            break;
+                                        case 6:
+                                            count = Math.floor((Math.random() * 2400)) + 1200;
+                                            break;
+                                        case 7:
+                                            count = Math.floor((Math.random() * 2400)) + 1200;
+                                            break;
+                                        case 8:
+                                            count = Math.floor((Math.random() * 2400)) + 1200;
+                                            break;
+                                        case 9:
+                                            count = Math.floor((Math.random() * 1900)) + 950;
+                                            break;
+                                        case 10:
+                                            count = Math.floor((Math.random() * 1600)) + 800;
+                                            break;
+                                        case 11:
+                                            count = Math.floor((Math.random() * 1600)) + 800;
+                                            break;
+                                        case 12:
+                                            count = Math.floor((Math.random() * 1900)) + 950;
+                                            break;
+                                        case 13:
+                                            count = Math.floor((Math.random() * 1900)) + 950;
+                                            break;
+                                        case 14:
+                                            count = Math.floor((Math.random() * 1500)) + 750;
+                                            break;
+                                        case 15:
+                                            count = Math.floor((Math.random() * 1600)) + 800;
+                                            break;
+                                        case 16:
+                                            count = Math.floor((Math.random() * 1600)) + 800;
+                                            break;
+                                        case 17:
+                                            count = Math.floor((Math.random() * 2000)) + 1000;
+                                            break;
+                                        case 18:
+                                            count = Math.floor((Math.random() * 2600)) + 1300;
+                                            break;
+                                        case 19:
+                                            count = Math.floor((Math.random() * 2600)) + 1300;
+                                            break;
+                                        case 20:
+                                            count = Math.floor((Math.random() * 2100)) + 1050;
+                                            break;
+                                        case 21:
+                                            count = Math.floor((Math.random() * 1200)) + 600;
+                                            break;
+                                        case 22:
+                                            count = Math.floor((Math.random() * 1200)) + 600;
+                                            break;
+                                        case 23:
+                                            count = Math.floor((Math.random() * 1200)) + 600;
+                                            break;
+                                    }
+                                }
+                                v.setOptions({fillColor: returnCountColour(count)});
+                                $.each(areaCentroids, function (k2, v2) {
+                                    if (k == k2) {
+                                        var label = new Label({map: map});
+                                        label.set('position', new google.maps.LatLng(v2[0], v2[1]));
+                                        label.set('text', k2 + ": " + count);
+                                    }
+                                });
+                            });
+                        }, 5000);
+
+                        setInterval(function () {
+                            generateGraph();
+                        }, 1800000);
+                        
+                        generateGraph();
+                    },
+                    error: function (status) {
+                        alert("Error" + status + " has occurred.");
+                    }
+                });
+
+                function generateGraph() {
+                    for (var g = 0; g < geojsonData.length; g++) {
+                        var name = geojsonData[g]["properties"]["name"];
+
+                        var d = new Date();
+                        var currentHour = parseInt(d.getHours());
+                        var seriesData = [];
+                        var pax = 0;
+
+                        for (var h = 0; h <= currentHour; h++) {
+                            switch (h) {
+                                case 0:
+                                    pax = Math.floor((Math.random() * 60)) + 30;
+                                    break;
+                                case 1:
+                                    pax = Math.floor((Math.random() * 600)) + 300;
+                                    break;
+                                case 2:
+                                    pax = Math.floor((Math.random() * 600)) + 300;
+                                    break;
+                                case 3:
+                                    pax = Math.floor((Math.random() * 600)) + 300;
+                                    break;
+                                case 4:
+                                    pax = Math.floor((Math.random() * 700)) + 350;
+                                    break;
+                                case 5:
+                                    pax = Math.floor((Math.random() * 1200)) + 600;
+                                    break;
+                                case 6:
+                                    pax = Math.floor((Math.random() * 2400)) + 1200;
+                                    break;
+                                case 7:
+                                    pax = Math.floor((Math.random() * 2400)) + 1200;
+                                    break;
+                                case 8:
+                                    pax = Math.floor((Math.random() * 2400)) + 1200;
+                                    break;
+                                case 9:
+                                    pax = Math.floor((Math.random() * 1900)) + 950;
+                                    break;
+                                case 10:
+                                    pax = Math.floor((Math.random() * 1600)) + 800;
+                                    break;
+                                case 11:
+                                    pax = Math.floor((Math.random() * 1600)) + 800;
+                                    break;
+                                case 12:
+                                    pax = Math.floor((Math.random() * 1900)) + 950;
+                                    break;
+                                case 13:
+                                    pax = Math.floor((Math.random() * 1900)) + 950;
+                                    break;
+                                case 14:
+                                    pax = Math.floor((Math.random() * 1500)) + 750;
+                                    break;
+                                case 15:
+                                    pax = Math.floor((Math.random() * 1600)) + 800;
+                                    break;
+                                case 16:
+                                    pax = Math.floor((Math.random() * 1600)) + 800;
+                                    break;
+                                case 17:
+                                    pax = Math.floor((Math.random() * 2000)) + 1000;
+                                    break;
+                                case 18:
+                                    pax = Math.floor((Math.random() * 2600)) + 1300;
+                                    break;
+                                case 19:
+                                    pax = Math.floor((Math.random() * 2600)) + 1300;
+                                    break;
+                                case 20:
+                                    pax = Math.floor((Math.random() * 2100)) + 1050;
+                                    break;
+                                case 21:
+                                    pax = Math.floor((Math.random() * 1200)) + 600;
+                                    break;
+                                case 22:
+                                    pax = Math.floor((Math.random() * 1200)) + 600;
+                                    break;
+                                case 23:
+                                    pax = Math.floor((Math.random() * 1200)) + 600;
+                                    break;
+                            }
+                            seriesData.push(pax);
+                        }
+                        areaCount[name] = seriesData;
+                    }
+                }
+
+                /*
+                 setTimeout(function() {
+                 $.each(areaPolygons, function(k, v) {
+                 v.setMap(null);                    
+                 }); 
+                 clearInterval(getCrowdDataInterval);
+                 $(".realtime_crowd_labels").remove();
+                 }, 3000) ;                                
+                 */
+
+            }); // document ready
+        </script>    
+    </head>
+    <body>      
+        <div id="map"></div>      
+    </body>
+</html>
